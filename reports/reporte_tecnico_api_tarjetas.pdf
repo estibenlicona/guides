@@ -1,0 +1,500 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Count 5 /Kids [4 0 R 6 0 R 8 0 R 10 0 R 12 0 R] >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 5 0 R /Resources << /Font << /F1 3 0 R >> >> >>
+endobj
+5 0 obj
+<< /Length 1977 >>
+stream
+BT
+/F1 12 Tf
+1 0 0 1 72 770 Tm
+14 TL
+(REPORTE TCNICO - API CONSULTA TARJETAS DE CRDITO) Tj
+T*
+T*
+T*
+(Este documento acompaa el resumen ejecutivo y est pensado para que el equipo de desarrollo) Tj
+T*
+(tenga todo lo necesario para aplicar los fixes.) Tj
+T*
+T*
+(---) Tj
+T*
+T*
+(ERR-001  DEADLOCKS POR MEZCLAR ASYNC/SYNC) Tj
+T*
+T*
+(? Criticidad: Crtica) Tj
+T*
+(? Ubicacin: CardService.cs \(lnea 68\), CardDetailService.cs \(lneas 64, 255, 326\),) Tj
+T*
+(  BinesProductInfoService.cs \(lneas 53-55\), ErrorHandlerMiddleware.cs \(lnea 73\)) Tj
+T*
+(? Explicacin: Las llamadas usan .Result, .Wait\(\) o GetAwaiter\(\).GetResult\(\) dentro de) Tj
+T*
+(  flujos async. Cuando aumenta la concurrencia se agota el thread pool y aparecen deadlocks.) Tj
+T*
+T*
+(Cdigo con problema) Tj
+T*
+T*
+T*
+(    Task.WhenAll\(taskFranCardData, taskPrivCardData\).ConfigureAwait\(false\).GetAwaiter\(\).GetResult\(\);) Tj
+T*
+(    var cardData = _validateTokenService.ValidateCardToken\(cardToken\).Result;) Tj
+T*
+(    Task.Run\(\(\) => persisteLog.AddLog\(traceIdentifier!.GUID, error, error.Message\)\).Wait\(\);) Tj
+T*
+T*
+T*
+(Cdigo propuesto) Tj
+T*
+T*
+T*
+(    await Task.WhenAll\(taskFranCardData, taskPrivCardData\);) Tj
+T*
+(    var cardData = await _validateTokenService.ValidateCardToken\(cardToken\);) Tj
+T*
+(    await persisteLog.AddLog\(traceIdentifier!.GUID, error, error.Message\);) Tj
+T*
+T*
+T*
+(---) Tj
+T*
+T*
+(ERR-002  PARALELISMO FALSO EN VALIDATETOKENSERVICE) Tj
+T*
+T*
+(? Criticidad: Crtica) Tj
+T*
+(? Ubicacin: ValidateTokenService.cs \(lneas 85-135\)) Tj
+T*
+(? Explicacin: Parallel.ForEachAsync invoca lgica sncrona dentro de Task.Run. En picos de) Tj
+T*
+(  uso replica el problema de ERR-001 y no devuelve resultados parciales hasta que termina el) Tj
+T*
+(  lote.) Tj
+T*
+T*
+T*
+(    flowchart LR) Tj
+T*
+(        A[Parallel.ForEachAsync] --> B[Task.Run sncrono]) Tj
+T*
+(        B --> C[ProccessCardToken bloqueante]) Tj
+T*
+(        C --> D[Thread pool agotado]) Tj
+T*
+T*
+ET
+endstream
+endobj
+6 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 7 0 R /Resources << /Font << /F1 3 0 R >> >> >>
+endobj
+7 0 obj
+<< /Length 1748 >>
+stream
+BT
+/F1 12 Tf
+1 0 0 1 72 770 Tm
+14 TL
+(Cdigo con problema) Tj
+T*
+T*
+T*
+(    await Parallel.ForEachAsync\(data, options, async \(card, token\) =>) Tj
+T*
+(    {) Tj
+T*
+(        await Task.Run\(\(\) =>) Tj
+T*
+(        {) Tj
+T*
+(            ProccessCardToken\(customer, customerToken, cardsToken, baseUrl, headers, card\);) Tj
+T*
+(        }, CancellationToken.None\);) Tj
+T*
+(    }\);) Tj
+T*
+T*
+T*
+(Cdigo propuesto) Tj
+T*
+T*
+T*
+(    var tasks = data.Select\(card => ProccessCardTokenAsync\() Tj
+T*
+(        customer, customerToken, baseUrl, headers, card\)\);) Tj
+T*
+(    ) Tj
+T*
+(    var results = await Task.WhenAll\(tasks\);) Tj
+T*
+(    var cardsToken = results.Where\(card => card is not null\).ToList\(\);) Tj
+T*
+T*
+T*
+(---) Tj
+T*
+T*
+(ERR-003  HTTPCLIENT SIN LMITES NI RESILIENCIA) Tj
+T*
+T*
+(? Criticidad: Crtica) Tj
+T*
+(? Ubicacin: DependencyInjectionHandler.cs \(configuracin del cliente\), RestService.cs) Tj
+T*
+(  \(CreateClient, PostServiceAsync\)) Tj
+T*
+(? Explicacin: Cada request crea un cliente nuevo sin timeout, reutiliza un handler propio y) Tj
+T*
+(  carece de circuit breaker. Cuando un proveedor tarda minutos respondemos con timeouts) Tj
+T*
+(  generales.) Tj
+T*
+T*
+(Cdigo con problema) Tj
+T*
+T*
+T*
+(    services.AddHttpClient<IRestService, RestService>\(\)) Tj
+T*
+(        .AddTransientHttpErrorPolicy\(policyBuilder =>) Tj
+T*
+(            policyBuilder.WaitAndRetryAsync\(Backoff.DecorrelatedJitterBackoffV2\(TimeSpan.FromSeconds\(1\), 5\)\)\);) Tj
+T*
+(    ) Tj
+T*
+(    HttpClientHandler l_objHttpClientHandler = new HttpClientHandler\(\);) Tj
+T*
+(    using var httpClient = CreateClient\(\);) Tj
+T*
+T*
+T*
+(Cdigo propuesto) Tj
+T*
+T*
+T*
+(    services.AddHttpClient<IRestService, RestService>\(client =>) Tj
+T*
+(    {) Tj
+ET
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 9 0 R /Resources << /Font << /F1 3 0 R >> >> >>
+endobj
+9 0 obj
+<< /Length 2399 >>
+stream
+BT
+/F1 12 Tf
+1 0 0 1 72 770 Tm
+14 TL
+(        client.Timeout = TimeSpan.FromSeconds\(10\);) Tj
+T*
+(    }\)) Tj
+T*
+(    .ConfigurePrimaryHttpMessageHandler\(\(\) => new HttpClientHandler) Tj
+T*
+(    {) Tj
+T*
+(        MaxConnectionsPerServer = 50,) Tj
+T*
+(    }\)) Tj
+T*
+(    .AddTransientHttpErrorPolicy\(builder =>) Tj
+T*
+(        builder.WaitAndRetryAsync\(Backoff.DecorrelatedJitterBackoffV2\(TimeSpan.FromSeconds\(1\), 3\)\)\)) Tj
+T*
+(    .AddTransientHttpErrorPolicy\(builder =>) Tj
+T*
+(        builder.CircuitBreakerAsync\(5, TimeSpan.FromSeconds\(30\)\)\)) Tj
+T*
+(    .AddPolicyHandler\(Policy.TimeoutAsync<HttpResponseMessage>\(TimeSpan.FromSeconds\(5\)\)\);) Tj
+T*
+(    ) Tj
+T*
+(    public async Task<T> PostServiceAsync<T>\(string baseUrl, object parameters, IDictionary<string, string?> headers\)) Tj
+T*
+(    {) Tj
+T*
+(        _createClient.DefaultRequestHeaders.Clear\(\);) Tj
+T*
+(        _createClient.DefaultRequestHeaders.Accept.Add\(new MediaTypeWithQualityHeaderValue\("application/json"\)\);) Tj
+T*
+(        AddHeadersForReq\(headers!, _createClient\);) Tj
+T*
+(    ) Tj
+T*
+(        HttpContent jsonObject = new StringContent\() Tj
+T*
+(            JsonConvert.SerializeObject\(parameters\),) Tj
+T*
+(            Encoding.UTF8,) Tj
+T*
+(            "application/json"\);) Tj
+T*
+(    ) Tj
+T*
+(        HttpResponseMessage res = await _createClient.PostAsync\(baseUrl, jsonObject\);) Tj
+T*
+(        var data = await res.Content.ReadAsStringAsync\(\);) Tj
+T*
+(        return JsonConvert.DeserializeObject<T>\(data\)!;) Tj
+T*
+(    }) Tj
+T*
+T*
+T*
+(---) Tj
+T*
+T*
+(ERR-004  ESCRITURAS PESADAS EN MONGODB DENTRO DEL REQUEST) Tj
+T*
+T*
+(? Criticidad: Alta) Tj
+T*
+(? Ubicacin: CrudService.cs \(AddOrUpdate\)) Tj
+T*
+(? Explicacin: Se actualizan colecciones grandes con AddToSetEach dentro del request. El) Tj
+T*
+(  hilo queda bloqueado hasta que Mongo confirma.) Tj
+T*
+T*
+(Cdigo con problema) Tj
+T*
+T*
+T*
+(    result = await collection.UpdateOneAsync\() Tj
+T*
+(        Builders<TEntity>.Filter.Eq\(i => i.Id, data.Id\),) Tj
+T*
+(        Builders<TEntity>.Update) Tj
+T*
+(            .SetOnInsert\(s => s.Id, data.Id\)) Tj
+T*
+(            .SetOnInsert\(s => s.CreateDateTime, DateTime.Now\)) Tj
+T*
+(            .Set\(s => s.IdCard, data.IdCard\)) Tj
+T*
+(            .AddToSetEach\(s => s.CardsNumber, data.CardsNumber\)) Tj
+T*
+(            .AddToSetEach\(s => s.CardsToken, data.CardsToken\)) Tj
+ET
+endstream
+endobj
+10 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 11 0 R /Resources << /Font << /F1 3 0 R >> >> >>
+endobj
+11 0 obj
+<< /Length 1989 >>
+stream
+BT
+/F1 12 Tf
+1 0 0 1 72 770 Tm
+14 TL
+(            .AddToSetEach\(s => s.CardsType, data.CardsType\),) Tj
+T*
+(        new UpdateOptions { IsUpsert = true }\);) Tj
+T*
+T*
+T*
+(Cdigo propuesto) Tj
+T*
+T*
+T*
+(    public async Task QueueCardUpdateAsync\(CardData data\)) Tj
+T*
+(    {) Tj
+T*
+(        await _eventBus.PublishAsync\("card-data-updated", data\);) Tj
+T*
+(    }) Tj
+T*
+(    ) Tj
+T*
+(    public async Task HandleCardUpdateAsync\(CardData data\)) Tj
+T*
+(    {) Tj
+T*
+(        await _collection.UpdateOneAsync\() Tj
+T*
+(            Builders<CardData>.Filter.Eq\(i => i.Id, data.Id\),) Tj
+T*
+(            Builders<CardData>.Update) Tj
+T*
+(                .SetOnInsert\(s => s.Id, data.Id\)) Tj
+T*
+(                .SetOnInsert\(s => s.CreateDateTime, DateTime.UtcNow\)) Tj
+T*
+(                .Set\(s => s.IdCard, data.IdCard\)) Tj
+T*
+(                .AddToSetEach\(s => s.CardsNumber, data.CardsNumber\)) Tj
+T*
+(                .AddToSetEach\(s => s.CardsToken, data.CardsToken\)) Tj
+T*
+(                .AddToSetEach\(s => s.CardsType, data.CardsType\),) Tj
+T*
+(            new UpdateOptions { IsUpsert = true }\);) Tj
+T*
+(    }) Tj
+T*
+T*
+T*
+(---) Tj
+T*
+T*
+(ERR-005  CACHE DUPLICADO Y COSTOSO EN CARDDETAILSERVICE) Tj
+T*
+T*
+(? Criticidad: Media) Tj
+T*
+(? Ubicacin: CardDetailService.cs \(lneas 40-58\)) Tj
+T*
+(? Explicacin: Cada request reconstruye un cache en memoria y adems consulta Redis sin) Tj
+T*
+(  invalidacin clara.) Tj
+T*
+T*
+(Cdigo con problema) Tj
+T*
+T*
+T*
+(    var cacheKey = $"card-detail-{cardId}";) Tj
+T*
+(    if \(!_memoryCache.TryGetValue\(cacheKey, out CardDetail? detail\)\)) Tj
+T*
+(    {) Tj
+T*
+(        detail = _redisCache.Get<CardDetail>\(cacheKey\);) Tj
+T*
+(        if \(detail is null\)) Tj
+T*
+(        {) Tj
+T*
+(            detail = GetCardDetailFromDb\(cardId\);) Tj
+T*
+(            _redisCache.Set\(cacheKey, detail, TimeSpan.FromMinutes\(5\)\);) Tj
+T*
+(        }) Tj
+T*
+(        _memoryCache.Set\(cacheKey, detail, TimeSpan.FromMinutes\(1\)\);) Tj
+ET
+endstream
+endobj
+12 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 13 0 R /Resources << /Font << /F1 3 0 R >> >> >>
+endobj
+13 0 obj
+<< /Length 1340 >>
+stream
+BT
+/F1 12 Tf
+1 0 0 1 72 770 Tm
+14 TL
+(    }) Tj
+T*
+(    return detail;) Tj
+T*
+T*
+T*
+(Cdigo propuesto) Tj
+T*
+T*
+T*
+(    public async Task<CardDetail?> GetCardDetailAsync\(Guid cardId\)) Tj
+T*
+(    {) Tj
+T*
+(        var cacheKey = $"card-detail-{cardId}";) Tj
+T*
+(        return await _distributedCache.GetOrCreateAsync\(cacheKey, async entry =>) Tj
+T*
+(        {) Tj
+T*
+(            entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes\(5\);) Tj
+T*
+(            return await _cardRepository.GetCardDetailAsync\(cardId\);) Tj
+T*
+(        }\);) Tj
+T*
+(    }) Tj
+T*
+T*
+T*
+(---) Tj
+T*
+T*
+(ERR-006  LOGGING BLOQUEANTE EN MIDDLEWARE DE ERRORES) Tj
+T*
+T*
+(? Criticidad: Media) Tj
+T*
+(? Ubicacin: ErrorHandlerMiddleware.cs \(lneas 68-90\)) Tj
+T*
+(? Explicacin: El middleware atrapa excepciones pero registra el error con .Wait\(\),) Tj
+T*
+(  devolviendo la respuesta tarde y bloqueando el pipeline.) Tj
+T*
+T*
+(Cdigo con problema) Tj
+T*
+T*
+T*
+(    Task.Run\(\(\) =>) Tj
+T*
+(    {) Tj
+T*
+(        persisteLog.AddLog\(traceIdentifier!.GUID, error, error.Message\);) Tj
+T*
+(    }\).Wait\(\);) Tj
+T*
+T*
+T*
+(Cdigo propuesto) Tj
+T*
+T*
+T*
+(    await persisteLog.AddLog\(traceIdentifier!.GUID, error, error.Message\);) Tj
+T*
+T*
+T*
+(---) Tj
+T*
+T*
+(Si necesitan ms contexto o pairing para aplicar los cambios, avsenme y lo vemos juntos.) Tj
+ET
+endstream
+endobj
+xref
+0 14
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000141 00000 n 
+0000000211 00000 n 
+0000000337 00000 n 
+0000002366 00000 n 
+0000002492 00000 n 
+0000004292 00000 n 
+0000004418 00000 n 
+0000006869 00000 n 
+0000006997 00000 n 
+0000009039 00000 n 
+0000009167 00000 n 
+trailer
+<< /Size 14 /Root 1 0 R >>
+startxref
+10560
+%%EOF
