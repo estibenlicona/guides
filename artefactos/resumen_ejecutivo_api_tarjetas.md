@@ -38,7 +38,7 @@ Se identificó la presencia de una doble capa de caché (IMemoryCache y IDistrib
 #### Descripción
 Se identificó que varios servicios han sido registrados con un ciclo de vida inadecuado en el contenedor de despencias DependencyInjectionHandler. En particular, los servicios de cache fueron configurados como Scoped, lo cual genera instancias nuevas en cada request, cuando en realidad son servicios sin estado que deberían ser Singleton.
 
-### Hallazgo 8 - Falta de circuit breaker funcional (Polly inefectivo por uso bloqueante)
+### Hallazgo 7 - Falta de circuit breaker funcional (Polly inefectivo por uso bloqueante)
 #### Severidad: Crítica
 #### Descripción
 Aunque Polly está configurado, no entra en efecto porque el acceso a HTTP se hace con patrones bloqueantes (.Result, .GetAwaiter().GetResult()), rompiendo la asincronía end-to-end. No existe un Circuit Breaker operativo, por lo que ante la caída de servicios externos se generan reintentos excesivos y timeouts acumulativos, con riesgo de fallas en cascada y degradación global.
