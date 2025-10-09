@@ -4,39 +4,39 @@
 ### **Severidad:** 🔴 CRÍTICA
 ### **Descripción Técnica:**
 
-El código utiliza patrones bloqueantes (`.Result`, `.GetAwaiter().GetResult()`, `.Wait()`) sobre operaciones asíncronas, causando **context deadlocks** bajo alta concurrencia. Esto agota el Thread Pool.
+El código utiliza patrones bloqueantes (`.Result`, `.GetAwaiter().GetResult()`, `.Wait()`) sobre operaciones asíncronas, causando **threads exhaustation** bajo alta concurrencia. en otras palabras esto agota el Thread Pool.
 
 ---
 
 ### **Problema 1.1: CardService.cs - Línea 68**
-#### **Código Actual ⚠️:**
+#### Código Actual ⚠️:
 
 ```csharp
-// CardService.cs - Método GetCards
+// CardService.cs
 public async Task<Response<GetCardsResponse>> GetCards(string tppId, Query query, string token)
 {
     
     var taskFranCardData = GetFranchisedCard(customerId!);
     var taskPrivCardData = GetPrivateCard(documentType!, documentNumber!);
 
-    // ⚠️ PROBLEMA: GetAwaiter().GetResult() bloquea el hilo
+    // ⚠️ GetAwaiter().GetResult() bloquea el hilo
     Task.WhenAll(taskFranCardData, taskPrivCardData)
         .ConfigureAwait(false)
         .GetAwaiter()
         .GetResult();
 }
 ```
-#### **Solución ✅:**
+#### Solución Propuesta✅:
 
 ```csharp
-// CardService.cs - Refactorizado
+// CardService.cs
 public async Task<Response<GetCardsResponse>> GetCards(string tppId, Query query, string token)
 {
     
     var taskFranCardData = GetFranchisedCard(customerId!);
     var taskPrivCardData = GetPrivateCard(documentType!, documentNumber!);
 
-    // ✅ CORRECTO: await libera el thread durante I/O
+    // ✅ await libera el thread durante I/O
     await Task.WhenAll(taskFranCardData, taskPrivCardData);
 
 }
@@ -45,7 +45,7 @@ public async Task<Response<GetCardsResponse>> GetCards(string tppId, Query query
 ---
 
 ### **Problema 1.2: CardDetailService.cs - Líneas 255 y 326**
-#### **Código Actual ⚠️:**
+#### Código Actual ⚠️:
 
 ```csharp
 // CardDetailService.cs - Método GetCardDetailFranchised
@@ -58,7 +58,7 @@ private async Task<CardDetailResponseDto> GetCardDetailFranchised(
     var paymentValues = GetPaymentValuesCommon<PaymentValuesPrivateObject>(restPayment);
     var consultQuotas = GetConsultQuotasCommon<ConsultQuotasPrivateResponse>(restConsult);
 
-    // ⚠️ PROBLEMA: Mismo patrón bloqueante
+    // ⚠️ Mismo patrón bloqueante
     Task.WhenAll(paymentValues, consultQuotas)
         .ConfigureAwait(false)
         .GetAwaiter()
@@ -67,10 +67,10 @@ private async Task<CardDetailResponseDto> GetCardDetailFranchised(
 }
 ```
 
-#### **Solución ✅:**
+#### Solución Propuesta✅:
 
 ```csharp
-// CardDetailService.cs - Refactorizado
+// CardDetailService.cs
 private async Task<CardDetailResponseDto> GetCardDetailFranchised(
     CardDetailRequestQueryDto query, 
     string tppId, 
@@ -80,7 +80,7 @@ private async Task<CardDetailResponseDto> GetCardDetailFranchised(
     var paymentValues = GetPaymentValuesCommon<PaymentValuesPrivateObject>(restPayment);
     var consultQuotas = GetConsultQuotasCommon<ConsultQuotasPrivateResponse>(restConsult);
 
-    // ✅ CORRECTO: await permite concurrencia sin bloquear
+    // ✅ await permite concurrencia sin bloquear
     await Task.WhenAll(paymentValues, consultQuotas);
 
 }
@@ -89,13 +89,13 @@ private async Task<CardDetailResponseDto> GetCardDetailFranchised(
 ---
 
 ### **Problema 1.3: BinesProductInfoService.cs - Líneas 53-55**
-#### **Código Actual ⚠️:**
+#### Código Actual ⚠️:
 
 ```csharp
 // BinesProductInfoService.cs - Método GetInfoCardBin
 public async Task<BinesProductIdDto?> GetInfoCardBin()
 {
-    // ⚠️ PROBLEMA: .Result bloquea el thread
+    // ⚠️ .Result bloquea el thread
     var resultCache = _cache.ConsultarRequest("BINESOPENAPI");
     if (resultCache.Result.Response is not null)
     {
@@ -105,13 +105,13 @@ public async Task<BinesProductIdDto?> GetInfoCardBin()
 }
 ```
 
-#### **Solución ✅:**
+#### Solución Propuesta✅:
 
 ```csharp
-// BinesProductInfoService.cs - Refactorizado
+// BinesProductInfoService.cs
 public async Task<BinesProductIdDto?> GetInfoCardBin()
 {
-    // ✅ CORRECTO: await en vez de .Result
+    // ✅ await en vez de .Result
     var resultCache = await _cache.ConsultarRequest("BINESOPENAPI");
     if (resultCache.Response is not null)
     {
@@ -125,27 +125,27 @@ public async Task<BinesProductIdDto?> GetInfoCardBin()
 
 ### **Problema 1.4: ValidateTokenService.cs - Líneas 117 y 131**
 
-#### **Código Actual ⚠️:**
+#### Código Actual ⚠️:
 
 ```csharp
-// ValidateTokenService.cs - Método ProccessCardToken
+// ValidateTokenService.cs
 private void ProccessCardToken(CustomerTokenResponse customer, string customerToken, ConcurrentBag<CardData> cardsToken, string baseUrl, Dictionary<string, string> headers, CardData card)
 {
     if (!string.IsNullOrEmpty(card.Expiration))
     {
-        // ⚠️ PROBLEMA: uso de .Result dentro de método síncrono
+        // ⚠️ uso de .Result dentro de método síncrono
         ValidateCardFranchisResponse(customer, customerToken, cardsToken, baseUrl, headers, card);
     }
     else
     {
-        // ⚠️ PROBLEMA: uso de .Result dentro de método
+        // ⚠️ uso de .Result dentro de método
         ValidateCardPrivateResponse(customer, customerToken, cardsToken, baseUrl, headers, card);
     }
 }
 
 private void ValidateCardPrivateResponse(CustomerTokenResponse customer, string customerToken, ConcurrentBag<CardData> cardsToken, string baseUrl, Dictionary<string, string> headers, CardData card)
 {
-    // ⚠️ PROBLEMA: .Result bloquea el Thread
+    // ⚠️ .Result bloquea el Thread
     var resultado = PostCardTokenPrivate(card, customer, customerToken, baseUrl, headers).Result;
     if (resultado?.Data is not null)
     {
@@ -158,7 +158,7 @@ private void ValidateCardPrivateResponse(CustomerTokenResponse customer, string 
 
 private void ValidateCardFranchisResponse(CustomerTokenResponse customer, string customerToken, ConcurrentBag<CardData> cardsToken, string baseUrl, Dictionary<string, string> headers, CardData card)
 {
-    // ⚠️ PROBLEMA: .Result bloquea el Thread
+    // ⚠️ .Result bloquea el Thread
     var resultado = PostCardTokenFranchis(card, customer, customerToken, baseUrl, headers).Result;
     if (resultado?.Data is not null)
     {
@@ -170,10 +170,10 @@ private void ValidateCardFranchisResponse(CustomerTokenResponse customer, string
 }
 ```
 
-#### **Solución ✅:**
+#### Solución Propuesta✅:
 
 ```csharp
-// ValidateTokenService.cs - Refactorizado
+// ValidateTokenService.cs
 
 // 1. Cambiar método a async
 private async Task<CardData?> ProccessCardTokenAsync(
@@ -185,12 +185,12 @@ private async Task<CardData?> ProccessCardTokenAsync(
 {
     if (!string.IsNullOrEmpty(card.Expiration))
     {
-        // ✅ CORRECTO: uso de await no bloqueante
+        // ✅ uso de await no bloqueante
         await ValidateCardFranchisResponseAsync(customer, customerToken, cardsToken, baseUrl, headers, card);
     }
     else
     {
-        // ✅ CORRECTO: uso de await no bloqueante
+        // ✅ uso de await no bloqueante
         await ValidateCardPrivateResponseAsync(customer, customerToken, cardsToken, baseUrl, headers, card);
     }   
 }
@@ -198,7 +198,7 @@ private async Task<CardData?> ProccessCardTokenAsync(
 // 2. Cambiar método a async
 private async Task ValidateCardFranchisResponseAsync(CustomerTokenResponse customer, string customerToken, ConcurrentBag<CardData> cardsToken, string baseUrl, Dictionary<string, string> headers, CardData card)
 {
-    ✅ CORRECTO: uso de await no bloqueante
+    ✅ uso de await no bloqueante
     var resultado = await PostCardTokenFranchisAsync(card, customer, customerToken, baseUrl, headers);
     if (resultado?.Data is not null)
     {
@@ -212,7 +212,7 @@ private async Task ValidateCardFranchisResponseAsync(CustomerTokenResponse custo
 // 3. Cambiar método a async
 private async Task ValidateCardPrivateResponseAsync(CustomerTokenResponse customer, string customerToken, ConcurrentBag<CardData> cardsToken, string baseUrl, Dictionary<string, string> headers, CardData card)
 {
-    ✅ CORRECTO: uso de await no bloqueante
+    // ✅ uso de await no bloqueante
     var resultado = await PostCardTokenPrivateAsync(card, customer, customerToken, baseUrl, headers);
     if (resultado?.Data is not null)
     {
@@ -235,12 +235,12 @@ public async Task InvokeAsync(HttpContext context, TraceIdentifier? traceIdentif
 {
     try
     {
-        // ⚠️ PROBLEMA: .ConfigureAwait innecesario
+        // ⚠️ .ConfigureAwait innecesario
         await _next(context).ConfigureAwait(false);
     }
     catch (Exception error)
     {
-         // ⚠️ PROBLEMA: uso interno de .Wait() bloquea el thread
+         // ⚠️ uso interno de .Wait() bloquea el thread
          SetStatusCodeResponse(context, logger, traceIdentifier, persisteLog, error, responseModel);
     }
 }
@@ -249,21 +249,21 @@ private static void SetStatusCodeResponse(HttpContext context, ILogger<ErrorHand
 {
     ...
 
-    // ⚠️ PROBLEMA: .Wait() bloquea el thread
+    // ⚠️ .Wait() bloquea el thread
     if (context.Response.StatusCode != StatusCodes.Status400BadRequest)
         Task.Run(() => persisteLog.AddLog(traceIdentifier!.GUID, error, error.Message)).Wait(); 
 
 }
 ```
-#### Solución ✅:
+#### Solución Propuesta✅:
 
 ```csharp
-// ErrorHandlerMiddleware.cs - Refactorizado
+// ErrorHandlerMiddleware.cs
 public async Task InvokeAsync(HttpContext context, TraceIdentifier? traceIdentifier)
 {
     try
     {
-        // ✅ CORRECTO: eliminar .ConfigureAwait
+        // ✅ eliminar .ConfigureAwait
         await _next(context);
     }
     catch (Exception error)
@@ -282,7 +282,7 @@ private static void SetStatusCodeResponse(HttpContext context, ILogger<ErrorHand
     if (context.Response.StatusCode.Equals(StatusCodes.Status500InternalServerError))
         responseModel.Message = Constants.PBCT_GENERAL_UNCONTROLLED_EXCEPTION;
 
-    // ✅ CORRECTO: eliminar persistencia innecesaria -> Usar Instana
+    // ✅ eliminar persistencia innecesaria -> Usar Instana
 
     logger.LogError(error, Constants.TEMPLATEITEM2, traceIdentifier, Constants.PBCT_GENERAL_UNCONTROLLED_INTERNAL_EXCEPTION);
 }
@@ -296,7 +296,7 @@ private static void SetStatusCodeResponse(HttpContext context, ILogger<ErrorHand
 
 ---
 
-### **Código Actual ⚠️:**
+### Código Actual ⚠️:
 
 ```csharp
 // ValidateTokenService.cs - Líneas 85-120
@@ -319,10 +319,10 @@ public async Task<List<CardData>> GetCardsToken(List<CardData> data,
 }
 ```
 
-### Solución ✅:
+### Solución Propuesta✅:
 
 ```csharp
-// ValidateTokenService.cs - Refactorizado
+// ValidateTokenService.cs
 
 public async Task<List<CardData>> GetCardsToken(List<CardData> data,
     CustomerTokenResponse customer, string customerToken, string tppId)
@@ -351,13 +351,13 @@ public async Task<List<CardData>> GetCardsToken(List<CardData> data,
 
 ---
 
-### **Código Actual ⚠️:**
+### Código Actual ⚠️:
 
 ```csharp
 // DependencyInjectionHandler.cs
 public static IServiceCollection DependencyInjectionConfig(this IServiceCollection services)
 {
-    // ⚠️ PROBLEMA: Sin timeout explícito, sin límite de conexiones
+    // ⚠️ Sin timeout explícito, sin límite de conexiones
     services.AddHttpClient<IRestService, RestService>()
         .AddTransientHttpErrorPolicy(policyBuilder => 
             policyBuilder.WaitAndRetryAsync(
@@ -368,7 +368,7 @@ public static IServiceCollection DependencyInjectionConfig(this IServiceCollecti
 }
 ```
 
-### **Solución:**
+### Solución Propuesta✅:
 Es importante resaltar que los valores definidos para el número de reintentos, el timeout por petición y los parámetros de configuración del circuit breaker deben establecerse en función de indicadores objetivos, como la latencia observada, los tiempos de recuperación de los servicios externos y el SLA de API Cards.
 Actualmente este SLA aún no está formalmente definido; sin embargo, en conversaciones con el especialista se ha mencionado que algunos clientes, como la APP, esperan respuestas en un máximo de 30 segundos.
 Por ello, resulta fundamental contar con estas métricas para poder aplicar una configuración realmente óptima que equilibre resiliencia, rendimiento y experiencia del usuario.
@@ -432,7 +432,7 @@ public async Task<Response<GetCardsResponse>> GetCards(...)
 {
     ...
     
-    // ⚠️ PROBLEMA: Escritura MongoDB BLOQUEA el response
+    // ⚠️ Escritura MongoDB BLOQUEA el response
     await _crudService.AddOrUpdate(_cardsEntity);
     
     return response;
@@ -478,13 +478,11 @@ public async Task AddOrUpdate<TEntity>(TEntity data) where TEntity : CommonEntit
 
 public async Task<Response<GetCardsResponse>> GetCards(...)
 {
-    // ... obtener tarjetas de APIs externas (500ms)
+    ...
     
     // ✅ NO persistir en MongoDB (usar Instana para trazabilidad)
     // await _crudService.AddOrUpdate(_cardsEntity);  // ← ELIMINAR
-    
-    // ✅ Retornar response INMEDIATAMENTE
-    return response;
+    ...
 }
 ```
 
@@ -554,48 +552,6 @@ public async Task<Response<GetCardsResponse>> GetCards(...)
 }
 ```
 
-**Beneficios:**
-- ✅ InsertOne es 5-10x más rápido que UpdateOne
-- ✅ Sin race conditions (cada evento es inmutable)
-- ✅ Arrays no crecen indefinidamente
-- ✅ Auditoría completa (histórico de eventos)
-- ✅ Escalable (sharding fácil por CustomerId)
-
----
-
-### **Crear Índices en MongoDB:**
-
-```javascript
-// Script de MongoDB para crear índices
-
-// Índice compuesto para queries por customer
-db.Cards.createIndex(
-    { "IdCard": 1, "CreateDateTime": -1 },
-    { 
-        name: "idx_customer_date",
-        background: true
-    }
-);
-
-// Índice para event sourcing (si se implementa Opción 3)
-db.CardAccessEvents.createIndex(
-    { "CustomerId": 1, "Timestamp": -1 },
-    {
-        name: "idx_customer_timestamp",
-        background: true
-    }
-);
-
-// Índice para queries por TraceId (troubleshooting)
-db.CardAccessEvents.createIndex(
-    { "TraceId": 1 },
-    {
-        name: "idx_traceid",
-        background: true
-    }
-);
-```
-
 ---
 
 ## Hallazgo 5 - Doble capa de cache con serialización innecesaria
@@ -619,7 +575,7 @@ public class CacheManager : ICacheManager
         _memoryCache = memoryCache;
     }
     
-    // ⚠️ PROBLEMA: Serializa a JSON antes de guardar en memoria
+    // ⚠️ Serializa a JSON antes de guardar en memoria
     public Task<bool> Save(string key, object valor, int segundos)
     {
         // ⚠️ JsonConvert.SerializeObject es COSTOSO e INNECESARIO
@@ -631,7 +587,7 @@ public class CacheManager : ICacheManager
         return Task.FromResult(true);
     }
     
-    // ⚠️ PROBLEMA: Deserializa desde JSON en cada lectura
+    // ⚠️ Deserializa desde JSON en cada lectura
     public Task<T> Get<T>(string key)
     {
         if (_memoryCache.TryGetValue(key, out string? valor))
@@ -668,7 +624,7 @@ public class CacheManager : ICacheManager
         _logger = logger;
     }
     
-    // ✅ CORRECTO: Guardar objeto directamente (sin serializar)
+    // ✅ Guardar objeto directamente (sin serializar)
     public Task<bool> Save<T>(string key, T valor, int segundos)
     {
         // ✅ Guardar objeto directamente (IMemoryCache es genérico)
@@ -677,7 +633,7 @@ public class CacheManager : ICacheManager
         return Task.FromResult(true);
     }
     
-    // ✅ CORRECTO: Obtener objeto directamente (sin deserializar)
+    // ✅ Obtener objeto directamente (sin deserializar)
     public Task<T?> Get<T>(string key)
     {
         if (_memoryCache.TryGetValue<T>(key, out var valor))
@@ -691,8 +647,6 @@ public class CacheManager : ICacheManager
     ...
 }
 ```
-
----
 
 ### **Actualizar ICacheManager interface:**
 
@@ -714,7 +668,7 @@ public interface ICacheManager
 
 ---
 
-### **Código Actual ⚠️:**
+### Código Actual ⚠️:
 
 ```csharp
 // DependencyInjectionHandler.cs
@@ -729,7 +683,7 @@ public static IServiceCollection DependencyInjectionConfig(this IServiceCollecti
 }
 ```
 
-### Solución ✅:
+### Solución Propuesta✅:
 
 ```csharp
 // DependencyInjectionHandler.cs
