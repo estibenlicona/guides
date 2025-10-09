@@ -369,86 +369,46 @@ public static IServiceCollection DependencyInjectionConfig(this IServiceCollecti
 ```
 
 ### **Solución:**
+Es importante resaltar que los valores definidos para el número de reintentos, el timeout por petición y los parámetros de configuración del circuit breaker deben establecerse en función de indicadores objetivos, como la latencia observada, los tiempos de recuperación de los servicios externos y el SLA de API Cards.
+Actualmente este SLA aún no está formalmente definido; sin embargo, en conversaciones con el especialista se ha mencionado que algunos clientes, como la APP, esperan respuestas en un máximo de 30 segundos.
+Por ello, resulta fundamental contar con estas métricas para poder aplicar una configuración realmente óptima que equilibre resiliencia, rendimiento y experiencia del usuario.
+
+También es conveniente separar IRestService por proveedor/endpoint, ya que actualmente consume varios servicios con perfiles de latencia y recuperación diferentes. Mantenerlos en un solo cliente dificulta ajustar timeouts, reintentos y circuit breakers de forma óptima para cada caso. Al separarlos, podremos asignar políticas específicas para cada endpoint.
 
 ```csharp
-// DependencyInjectionHandler.cs - Refactorizado
+// DependencyInjectionHandler.cs
 
 public static IServiceCollection DependencyInjectionConfig(
     this IServiceCollection services, 
     IConfiguration configuration)
 {
     
-    services.AddHttpClient<IRestService, RestService>(client =>
+    services.AddHttpClient<IRestService, RestService>()
+    .AddStandardResilienceHandler(o =>
     {
-        // ✅ Timeout explícito
-        client.Timeout = TimeSpan.FromSeconds(10);
-        
-        // ✅ Default headers
-        client.DefaultRequestHeaders.Add("Accept", "application/json");
-        client.DefaultRequestHeaders.Add("User-Agent", "API-Cards/1.0");
-    })
-    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
-    {
-        // ✅ Limitar conexiones concurrentes por servidor
-        MaxConnectionsPerServer = 50,
-        
-        // ✅ Compression automática
-        AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate,
-        
-        // ✅ Pooling de conexiones
-        UseProxy = false,
-        UseCookies = false
-    })
-    // ✅ Retry policy (solo después de eliminar .Result)
-    .AddTransientHttpErrorPolicy(policyBuilder =>
-        policyBuilder.WaitAndRetryAsync(
-            Backoff.DecorrelatedJitterBackoffV2(
-                medianFirstRetryDelay: TimeSpan.FromSeconds(1),
-                retryCount: 3  // ← Reducido de 5 a 3
-            ),
-            onRetry: (outcome, timespan, retryAttempt, context) =>
-            {
-                // ✅ Log de reintentos
-                var logger = context.GetLogger();
-                logger?.LogWarning(
-                    "Retry {RetryAttempt} después de {Delay}ms para {Uri}",
-                    retryAttempt,
-                    timespan.TotalMilliseconds,
-                    context.GetHttpRequestMessage()?.RequestUri
-                );
-            }
-        )
-    )
-    // ✅ Circuit breaker
-    .AddTransientHttpErrorPolicy(policyBuilder =>
-        policyBuilder.CircuitBreakerAsync(
-            handledEventsAllowedBeforeBreaking: 5,  // 5 fallos consecutivos
-            durationOfBreak: TimeSpan.FromSeconds(30),  // Abrir circuit por 30s
-            onBreak: (outcome, breakDelay) =>
-            {
-                var logger = outcome.Context.GetLogger();
-                logger?.LogError(
-                    "Circuit breaker ABIERTO por {BreakDelay}s después de {ConsecutiveFailures} fallos",
-                    breakDelay.TotalSeconds,
-                    5
-                );
-            },
-            onReset: () =>
-            {
-                var logger = /* obtener logger desde context */;
-                logger?.LogInformation("Circuit breaker CERRADO (restablecido)");
-            },
-            onHalfOpen: () =>
-            {
-                var logger = /* obtener logger desde context */;
-                logger?.LogWarning("Circuit breaker HALF-OPEN (probando)");
-            }
-        )
-    )
-    // ✅ Timeout policy (adicional al timeout del HttpClient)
-    .AddPolicyHandler(Policy.TimeoutAsync<HttpResponseMessage>(TimeSpan.FromSeconds(8)));
+        // Timeout por intento
+        o.AttemptTimeout = new HttpTimeoutStrategyOptions
+        {
+            Timeout = TimeSpan.FromSeconds(10) // Ajustar al p90 o p95 de los servicios llamados por medio de IRestService
+        };
+
+        // Retries (1 reintento)
+        o.Retry = new HttpRetryStrategyOptions
+        {
+            MaxRetryAttempts = 1
+        };
+
+        // Circuit breaker
+        o.CircuitBreaker = new HttpCircuitBreakerStrategyOptions
+        {
+            FailureRatio = 0.7,                     // 70% fallos en ventana
+            MinimumThroughput = 20,                 // al menos 20 requests
+            SamplingDuration = TimeSpan.FromSeconds(30),
+            BreakDuration = TimeSpan.FromSeconds(20) // El BreakDuration debería alinearse con el tiempo típico de recuperación del servicio externo
+        };
+    });
     
-    // ... resto de servicios
+    ...
     
     return services;
 }
@@ -456,148 +416,7 @@ public static IServiceCollection DependencyInjectionConfig(
 
 ---
 
-### **Extensión Helper para Logger en Polly Context:**
-
-```csharp
-// PollyContextExtensions.cs (nuevo archivo)
-public static class PollyContextExtensions
-{
-    private const string LoggerKey = "ILogger";
-    
-    public static Context WithLogger(this Context context, ILogger logger)
-    {
-        context[LoggerKey] = logger;
-        return context;
-    }
-    
-    public static ILogger? GetLogger(this Context context)
-    {
-        if (context.TryGetValue(LoggerKey, out var logger))
-        {
-            return logger as ILogger;
-        }
-        return null;
-    }
-    
-    public static HttpRequestMessage? GetHttpRequestMessage(this Context context)
-    {
-        if (context.TryGetValue("HttpRequestMessage", out var request))
-        {
-            return request as HttpRequestMessage;
-        }
-        return null;
-    }
-}
-```
-
----
-
-### **Uso en RestService:**
-
-```csharp
-// RestService.cs - Actualizado para usar Polly Context
-
-public class RestService : IRestService
-{
-    private readonly HttpClient _httpClient;
-    private readonly ILogger<RestService> _logger;
-    
-    public RestService(HttpClient httpClient, ILogger<RestService> logger)
-    {
-        _httpClient = httpClient;
-        _logger = logger;
-    }
-    
-    public async Task<RestResponse<T>> GetRestServiceAsync<T>(
-        string baseUrl, 
-        string resource, 
-        Dictionary<string, string?> headers)
-    {
-        try
-        {
-            // ✅ Construir request con headers
-            var request = new HttpRequestMessage(HttpMethod.Get, $"{baseUrl}/{resource}");
-            
-            foreach (var header in headers)
-            {
-                request.Headers.TryAddWithoutValidation(header.Key, header.Value);
-            }
-            
-            // ✅ Pasar logger al Context de Polly (para callbacks)
-            var context = new Context().WithLogger(_logger);
-            context["HttpRequestMessage"] = request;
-            
-            // ✅ Ejecutar request (Polly policies se aplican automáticamente)
-            var response = await _httpClient.SendAsync(request);
-            
-            if (response.IsSuccessStatusCode)
-            {
-                var content = await response.Content.ReadAsStringAsync();
-                var data = JsonConvert.DeserializeObject<T>(content);
-                
-                return new RestResponse<T>
-                {
-                    IsSuccess = true,
-                    Data = data,
-                    StatusCode = (int)response.StatusCode
-                };
-            }
-            else
-            {
-                _logger.LogWarning(
-                    "Request a {Uri} falló con status {StatusCode}",
-                    request.RequestUri,
-                    response.StatusCode
-                );
-                
-                return new RestResponse<T>
-                {
-                    IsSuccess = false,
-                    StatusCode = (int)response.StatusCode,
-                    ErrorMessage = response.ReasonPhrase
-                };
-            }
-        }
-        catch (TimeoutException tex)
-        {
-            _logger.LogError(tex, "Timeout en request a {BaseUrl}/{Resource}", baseUrl, resource);
-            
-            return new RestResponse<T>
-            {
-                IsSuccess = false,
-                StatusCode = 408,  // Request Timeout
-                ErrorMessage = "Request timeout"
-            };
-        }
-        catch (HttpRequestException hrex)
-        {
-            _logger.LogError(hrex, "Error HTTP en request a {BaseUrl}/{Resource}", baseUrl, resource);
-            
-            return new RestResponse<T>
-            {
-                IsSuccess = false,
-                StatusCode = 503,  // Service Unavailable
-                ErrorMessage = "Service unavailable"
-            };
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error inesperado en request a {BaseUrl}/{Resource}", baseUrl, resource);
-            
-            return new RestResponse<T>
-            {
-                IsSuccess = false,
-                StatusCode = 500,
-                ErrorMessage = "Internal error"
-            };
-        }
-    }
-}
-```
-
----
-
-## 🚨 Hallazgo 4: Persistencia Innecesaria en Camino Crítico
+## Hallazgo 4: Persistencia Innecesaria en Camino Crítico
 
 ### **Severidad:** 🟡 ALTA
 
@@ -605,18 +424,17 @@ public class RestService : IRestService
 
 ---
 
-### **Código Actual (❌ BLOQUEANTE):**
+### Código Actual ❌:
 
 ```csharp
 // CardService.cs - GetCards
 public async Task<Response<GetCardsResponse>> GetCards(...)
 {
-    // ... obtener tarjetas de APIs externas (500ms)
+    ...
     
     // ❌ PROBLEMA: Escritura MongoDB BLOQUEA el response
-    await _crudService.AddOrUpdate(_cardsEntity);  // +200ms
+    await _crudService.AddOrUpdate(_cardsEntity);
     
-    // Cliente espera 500ms (APIs) + 200ms (MongoDB) = 700ms total
     return response;
 }
 ```
@@ -653,10 +471,10 @@ public async Task AddOrUpdate<TEntity>(TEntity data) where TEntity : CommonEntit
 
 ---
 
-### **Solución OPCIÓN 1: Eliminar Persistencia (✅ RECOMENDADO):**
+### Solución OPCIÓN 1: Eliminar Persistencia ✅:
 
 ```csharp
-// CardService.cs - Refactorizado
+// CardService.cs
 
 public async Task<Response<GetCardsResponse>> GetCards(...)
 {
@@ -666,49 +484,13 @@ public async Task<Response<GetCardsResponse>> GetCards(...)
     // await _crudService.AddOrUpdate(_cardsEntity);  // ← ELIMINAR
     
     // ✅ Retornar response INMEDIATAMENTE
-    return response;  // Cliente recibe response en 500ms (no 700ms)
+    return response;
 }
 ```
 
-**Beneficio:** -200ms latencia (28% mejora)
-
 ---
 
-### **Solución OPCIÓN 2: Fire-and-Forget (si es necesario persistir):**
-
-```csharp
-// CardService.cs - Refactorizado con fire-and-forget
-
-public async Task<Response<GetCardsResponse>> GetCards(...)
-{
-    // ... obtener tarjetas de APIs externas (500ms)
-    
-    // ✅ Persistir en background (NO bloquea response)
-    _ = Task.Run(async () =>
-    {
-        try
-        {
-            await _crudService.AddOrUpdate(_cardsEntity);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, 
-                "Error persistiendo auditoría para customer {CustomerId}",
-                query.customerId
-            );
-        }
-    });
-    
-    // ✅ Retornar response INMEDIATAMENTE
-    return response;  // Cliente recibe response en 500ms
-}
-```
-
-**Beneficio:** -200ms latencia + persistencia mantiene
-
----
-
-### **Solución OPCIÓN 3: Event Sourcing (arquitectura correcta):**
+### **Solución OPCIÓN 3: Event Sourcing (cambio de arquitectura):**
 
 ```csharp
 // CardAccessEvent.cs (nuevo modelo)
@@ -734,7 +516,6 @@ public class EventStoreService : IEventStoreService
         var collection = _database.GetCollection<CardAccessEvent>("CardAccessEvents");
         
         // ✅ InsertOne es MÁS RÁPIDO que UpdateOne
-        // ✅ Sin race conditions (cada evento es único)
         await collection.InsertOneAsync(evt);
     }
 }
@@ -817,7 +598,7 @@ db.CardAccessEvents.createIndex(
 
 ---
 
-## 🚨 Hallazgo 5: Doble Capa de Cache con Serialización Innecesaria
+## Hallazgo 5: Doble Capa de Cache con Serialización Innecesaria
 
 ### **Severidad:** 🟡 ALTA
 
@@ -825,7 +606,7 @@ db.CardAccessEvents.createIndex(
 
 ---
 
-### **Código Actual (❌ INCORRECTO):**
+### Código Actual ❌:
 
 ```csharp
 // CacheManager.cs - Serialización JSON innecesaria
@@ -866,104 +647,15 @@ public class CacheManager : ICacheManager
 }
 ```
 
----
-
-### **¿Por qué es innecesario?**
-
-```csharp
-// IMemoryCache YA almacena objetos en memoria (no necesita serialización)
-
-// ❌ Lo que hace el código actual:
-Object → JSON string → IMemoryCache → JSON string → Object
-         ^^^^^^^^^^^                   ^^^^^^^^^^^
-         5ms + GC                      5ms + GC
-
-// ✅ Lo que debería hacer:
-Object → IMemoryCache → Object
-         ^^^^^^^^^^^^
-         0ms (referencia directa)
-```
+### ¿Por qué es innecesario?
+IMemoryCache ya almacena objetos en memoria (no necesita serialización)
 
 ---
 
-### **Solución (✅ CORRECTO):**
+### **OPCIÓN 2: Si se quiere mantener la abstracción, arreglar CacheManager:**
 
 ```csharp
-// OPCIÓN 1: Eliminar CacheManager y usar IMemoryCache directamente
-
-// BinesProductInfoService.cs - Refactorizado
-public class BinesProductInfoService : IBinesProductInfoService
-{
-    private readonly IMemoryCache _memoryCache;  // ✅ Inyectar directamente
-    private readonly IRestService _restService;
-    private readonly ILogger<BinesProductInfoService> _logger;
-    
-    public BinesProductInfoService(
-        IMemoryCache memoryCache,  // ✅ Sin CacheManager
-        IRestService restService,
-        ILogger<BinesProductInfoService> logger)
-    {
-        _memoryCache = memoryCache;
-        _restService = restService;
-        _logger = logger;
-    }
-    
-    public async Task<BinesProductIdDto?> GetInfoCardBin()
-    {
-        const string cacheKey = "BINESOPENAPI";
-        
-        // ✅ Acceso directo al cache (sin serialización)
-        if (_memoryCache.TryGetValue<BinesProductIdDto>(cacheKey, out var cachedData))
-        {
-            _logger.LogDebug("Cache hit para {CacheKey}", cacheKey);
-            return cachedData;
-        }
-        
-        _logger.LogDebug("Cache miss para {CacheKey}, consultando servicio externo", cacheKey);
-        
-        // Obtener datos del servicio externo
-        var response = await _restService.GetRestServiceAsync<BinesProductResponse>(
-            Constants.BASEURL_EXTERNAL_SERVICES,
-            Constants.RESOURCE_GETBINES,
-            new Dictionary<string, string?>()
-        );
-        
-        if (response?.IsSuccess == true && response.Data != null)
-        {
-            var jsonBines = JsonConvert.DeserializeObject<BinesProductIdDto>(
-                response.Data.ToString()!
-            );
-            
-            if (jsonBines != null)
-            {
-                // ✅ Guardar directamente (sin serialización)
-                var cacheOptions = new MemoryCacheEntryOptions
-                {
-                    AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(24),
-                    SlidingExpiration = TimeSpan.FromHours(6),
-                    Size = 1  // Para MemoryCache con SizeLimit
-                };
-                
-                _memoryCache.Set(cacheKey, jsonBines, cacheOptions);
-                
-                _logger.LogInformation("Datos de bines guardados en cache por 24 horas");
-                
-                return jsonBines;
-            }
-        }
-        
-        _logger.LogWarning("No se pudieron obtener datos de bines del servicio externo");
-        return null;
-    }
-}
-```
-
----
-
-### **OPCIÓN 2: Si quieres mantener abstracción, arreglar CacheManager:**
-
-```csharp
-// CacheManager.cs - Refactorizado (sin serialización)
+// CacheManager.cs - sin serialización
 
 public class CacheManager : ICacheManager
 {
@@ -979,64 +671,24 @@ public class CacheManager : ICacheManager
     // ✅ CORRECTO: Guardar objeto directamente (sin serializar)
     public Task<bool> Save<T>(string key, T valor, int segundos)
     {
-        try
-        {
-            var options = new MemoryCacheEntryOptions
-            {
-                AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(segundos),
-                Size = 1
-            };
-            
-            // ✅ Guardar objeto directamente (IMemoryCache es genérico)
-            _memoryCache.Set(key, valor, options);
-            
-            _logger.LogDebug("Guardado en cache: {Key} por {Seconds}s", key, segundos);
-            
-            return Task.FromResult(true);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error guardando en cache: {Key}", key);
-            return Task.FromResult(false);
-        }
+        // ✅ Guardar objeto directamente (IMemoryCache es genérico)
+        _memoryCache.Set(key, valor, new new TimeSpan(0, 0, segundos));
+        
+        return Task.FromResult(true);
     }
     
     // ✅ CORRECTO: Obtener objeto directamente (sin deserializar)
     public Task<T?> Get<T>(string key)
     {
-        try
+        if (_memoryCache.TryGetValue<T>(key, out var valor))
         {
-            if (_memoryCache.TryGetValue<T>(key, out var valor))
-            {
-                _logger.LogDebug("Cache hit: {Key}", key);
-                return Task.FromResult<T?>(valor);
-            }
-            
-            _logger.LogDebug("Cache miss: {Key}", key);
-            return Task.FromResult<T?>(default);
+            return Task.FromResult<T?>(valor);
         }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error leyendo de cache: {Key}", key);
-            return Task.FromResult<T?>(default);
-        }
+
+        return Task.FromResult<T?>(default);
     }
     
-    // ✅ Nuevo: Método para remover del cache
-    public Task<bool> Remove(string key)
-    {
-        try
-        {
-            _memoryCache.Remove(key);
-            _logger.LogDebug("Removido de cache: {Key}", key);
-            return Task.FromResult(true);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error removiendo de cache: {Key}", key);
-            return Task.FromResult(false);
-        }
-    }
+    ...
 }
 ```
 
@@ -1051,39 +703,10 @@ public interface ICacheManager
 {
     Task<bool> Save<T>(string key, T valor, int segundos);  // ✅ Genérico
     Task<T?> Get<T>(string key);  // ✅ Genérico
-    Task<bool> Remove(string key);  // ✅ Nuevo
 }
 ```
 
----
-
-### **Configurar MemoryCache con límite:**
-
-```csharp
-// DependencyInjectionHandler.cs
-
-services.AddMemoryCache(options =>
-{
-    options.SizeLimit = 1024;  // Limitar a 1024 entradas
-    options.CompactionPercentage = 0.25;  // Compactar al 75% de uso
-    options.ExpirationScanFrequency = TimeSpan.FromMinutes(5);  // Scan cada 5 min
-});
-```
-
----
-
-### **Performance Comparison:**
-
-| Operación | CacheManager (con serialización) | IMemoryCache directo | Mejora |
-|-----------|--------------------------------|---------------------|--------|
-| **Save (1KB object)** | ~5ms | ~0.001ms | 5000x |
-| **Get (1KB object)** | ~5ms | ~0.001ms | 5000x |
-| **Memory allocations** | ~2KB per op | ~0 bytes | 100% |
-| **GC pressure** | Alta | Ninguna | 100% |
-
----
-
-## 🚨 Hallazgo 6: Cache Registrado como Scoped (Cache Inútil)
+## Hallazgo 6: Cache Registrado como Scoped (Cache Inútil)
 
 ### **Severidad:** 🔴 CRÍTICA
 
@@ -1091,171 +714,41 @@ services.AddMemoryCache(options =>
 
 ---
 
-### **Código Actual (❌ INCORRECTO):**
+### **Código Actual ❌:**
 
 ```csharp
 // DependencyInjectionHandler.cs
 
 public static IServiceCollection DependencyInjectionConfig(this IServiceCollection services)
 {
-    // ❌ PROBLEMA CRÍTICO: Cache como Scoped = Cache inútil
+    // ❌ PROBLEMA CRÍTICO: Cache como Scoped = Cache no funcional, ya que se limpia en cada peticion
     services.AddScoped<ICacheManager, CacheManager>();
     services.AddScoped<ICacheService, CacheService>();
     
-    // Otros servicios...
-    services.AddScoped<IBinesProductInfoService, BinesProductInfoService>();
-    
-    return services;
+    ...
 }
 ```
 
----
-
-### **¿Por qué Cache Scoped es un desastre?**
+### Solución ✅:
 
 ```csharp
-// Flujo con Cache Scoped:
-
-Request 1 (10:00:00):
-  ├─ DI Container crea CacheManager #1 (vacío)
-  ├─ BinesProductInfoService.GetInfoCardBin()
-  │  ├─ Cache miss (cache vacío)
-  │  ├─ Llama API externa (500ms)
-  │  └─ Guarda en CacheManager #1
-  └─ Request termina → CacheManager #1 se DESTRUYE ❌
-
-Request 2 (10:00:01):
-  ├─ DI Container crea CacheManager #2 (vacío nuevo)
-  ├─ BinesProductInfoService.GetInfoCardBin()
-  │  ├─ Cache miss (cache vacío) ❌
-  │  ├─ Llama API externa (500ms) ❌
-  │  └─ Guarda en CacheManager #2
-  └─ Request termina → CacheManager #2 se DESTRUYE ❌
-
-Request 3-1000: MISMO PROBLEMA
-  └─ Cache hit rate: 0% ❌❌❌
-```
-
----
-
-### **Impacto Cuantificado:**
-
-```yaml
-Escenario: 1000 requests/min a GetInfoCardBin
-
-Con Cache Scoped (actual):
-  - Cache hit rate: 0%
-  - Llamadas a API externa: 1000/min
-  - Latencia por request: ~500ms
-  - CPU utilization: 80-100%
-  - Costo APIs: $$$$ (1000 llamadas/min × 30 días)
-
-Con Cache Singleton (correcto):
-  - Cache hit rate: 95%+
-  - Llamadas a API externa: 1-2/min (solo al inicio o expiración)
-  - Latencia por request: ~1ms (cache hit)
-  - CPU utilization: 40-60%
-  - Costo APIs: $ (1-2 llamadas/min × 30 días)
-
-Mejora:
-  - Latencia: -99.8% (de 500ms a 1ms)
-  - Llamadas API: -99.9% (de 1000/min a 1/min)
-  - CPU: -50%
-  - Costo: -99.9%
-```
-
----
-
-### **Solución (✅ CORRECTO):**
-
-```csharp
-// DependencyInjectionHandler.cs - Refactorizado
+// DependencyInjectionHandler.cs
 
 public static IServiceCollection DependencyInjectionConfig(
     this IServiceCollection services, 
     IConfiguration configuration)
 {
-    // ==============================================
-    // MONGODB CONFIGURATION
-    // ==============================================
+    ...
     
-    services.AddSingleton<IMongoClient>(sp =>
-    {
-        var connectionString = configuration.GetSection("ConnectionStrings:MongoDB").Value;
-        var settings = MongoClientSettings.FromConnectionString(connectionString);
-        settings.MaxConnectionPoolSize = 100;
-        settings.MinConnectionPoolSize = 10;
-        return new MongoClient(settings);
-    });
-
-    services.AddSingleton<IMongoDatabase>(sp =>
-    {
-        var client = sp.GetRequiredService<IMongoClient>();
-        var databaseName = configuration.GetSection("ConnectionStrings:DatabaseName").Value;
-        return client.GetDatabase(databaseName);
-    });
-
-    // ==============================================
-    // CACHE CONFIGURATION
-    // ==============================================
-    
-    // ✅ CRÍTICO: Cache debe ser Singleton
-    services.AddMemoryCache(options =>
-    {
-        options.SizeLimit = 1024;
-        options.CompactionPercentage = 0.25;
-    });
-    
-    // ✅ ELIMINAR CacheManager y CacheService (usar IMemoryCache directamente)
-    // O si se mantiene abstracción:
+    // ✅ CRÍTICO: La cache en memoria siempre debe ser Singleton
     services.AddSingleton<ICacheManager, CacheManager>();  // ← Singleton!
     services.AddSingleton<ICacheService, CacheService>();  // ← Singleton!
-    
-    // ==============================================
-    // INFRASTRUCTURE SERVICES
-    // ==============================================
     
     // ✅ CrudService como Singleton (thread-safe, sin estado)
     services.AddSingleton<ICrudService, CrudService>();
     
-    // ✅ HttpContextAccessor (para TraceId)
+    // ✅ HttpContextAccessor puede reemplazar implementacion de ITraceIdentifier ya que genera un TraceId por cada peticion.
     services.AddHttpContextAccessor();
-    
-    // ==============================================
-    // APPLICATION SERVICES (Scoped)
-    // ==============================================
-    
-    services.AddScoped<ICardService, CardService>();
-    services.AddScoped<ICardDetailService, CardDetailService>();
-    services.AddScoped<IBinesProductInfoService, BinesProductInfoService>();
-    services.AddScoped<IValidateTokenService, ValidateTokenService>();
-    services.AddScoped<ITokenService, TokenService>();
-    services.AddScoped<IPrivateCardHierarchyService, PrivateCardHierarchyService>();
-    services.AddScoped<IEmbededExternalService, EmbededExternalService>();
-    
-    // ✅ TraceIdentifier (Scoped - único por request)
-    services.AddScoped<TraceIdentifier>();
-    
-    // ==============================================
-    // HTTP CLIENT CONFIGURATION
-    // ==============================================
-    
-    services.AddHttpClient<IRestService, RestService>(client =>
-    {
-        client.Timeout = TimeSpan.FromSeconds(10);
-    })
-    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
-    {
-        MaxConnectionsPerServer = 50,
-        AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate
-    })
-    .AddTransientHttpErrorPolicy(policyBuilder => 
-        policyBuilder.WaitAndRetryAsync(
-            Backoff.DecorrelatedJitterBackoffV2(TimeSpan.FromSeconds(1), 3)
-        ))
-    .AddTransientHttpErrorPolicy(policyBuilder =>
-        policyBuilder.CircuitBreakerAsync(5, TimeSpan.FromSeconds(30)));
-    
-    return services;
+    ...
 }
 ```
