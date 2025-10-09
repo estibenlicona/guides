@@ -9,7 +9,7 @@ El código utiliza patrones bloqueantes (`.Result`, `.GetAwaiter().GetResult()`,
 ---
 
 ### **Problema 1.1: CardService.cs - Línea 68**
-#### **Código Actual ❌:**
+#### **Código Actual ⚠️:**
 
 ```csharp
 // CardService.cs - Método GetCards
@@ -19,7 +19,7 @@ public async Task<Response<GetCardsResponse>> GetCards(string tppId, Query query
     var taskFranCardData = GetFranchisedCard(customerId!);
     var taskPrivCardData = GetPrivateCard(documentType!, documentNumber!);
 
-    // ❌ PROBLEMA: GetAwaiter().GetResult() bloquea el hilo
+    // ⚠️ PROBLEMA: GetAwaiter().GetResult() bloquea el hilo
     Task.WhenAll(taskFranCardData, taskPrivCardData)
         .ConfigureAwait(false)
         .GetAwaiter()
@@ -45,7 +45,7 @@ public async Task<Response<GetCardsResponse>> GetCards(string tppId, Query query
 ---
 
 ### **Problema 1.2: CardDetailService.cs - Líneas 255 y 326**
-#### **Código Actual ❌:**
+#### **Código Actual ⚠️:**
 
 ```csharp
 // CardDetailService.cs - Método GetCardDetailFranchised
@@ -58,7 +58,7 @@ private async Task<CardDetailResponseDto> GetCardDetailFranchised(
     var paymentValues = GetPaymentValuesCommon<PaymentValuesPrivateObject>(restPayment);
     var consultQuotas = GetConsultQuotasCommon<ConsultQuotasPrivateResponse>(restConsult);
 
-    // ❌ PROBLEMA: Mismo patrón bloqueante
+    // ⚠️ PROBLEMA: Mismo patrón bloqueante
     Task.WhenAll(paymentValues, consultQuotas)
         .ConfigureAwait(false)
         .GetAwaiter()
@@ -89,13 +89,13 @@ private async Task<CardDetailResponseDto> GetCardDetailFranchised(
 ---
 
 ### **Problema 1.3: BinesProductInfoService.cs - Líneas 53-55**
-#### **Código Actual ❌:**
+#### **Código Actual ⚠️:**
 
 ```csharp
 // BinesProductInfoService.cs - Método GetInfoCardBin
 public async Task<BinesProductIdDto?> GetInfoCardBin()
 {
-    // ❌ PROBLEMA: .Result bloquea el thread
+    // ⚠️ PROBLEMA: .Result bloquea el thread
     var resultCache = _cache.ConsultarRequest("BINESOPENAPI");
     if (resultCache.Result.Response is not null)
     {
@@ -125,7 +125,7 @@ public async Task<BinesProductIdDto?> GetInfoCardBin()
 
 ### **Problema 1.4: ValidateTokenService.cs - Líneas 117 y 131**
 
-#### **Código Actual ❌:**
+#### **Código Actual ⚠️:**
 
 ```csharp
 // ValidateTokenService.cs - Método ProccessCardToken
@@ -133,19 +133,19 @@ private void ProccessCardToken(CustomerTokenResponse customer, string customerTo
 {
     if (!string.IsNullOrEmpty(card.Expiration))
     {
-        // ❌ PROBLEMA: uso de .Result dentro de método síncrono
+        // ⚠️ PROBLEMA: uso de .Result dentro de método síncrono
         ValidateCardFranchisResponse(customer, customerToken, cardsToken, baseUrl, headers, card);
     }
     else
     {
-        // ❌ PROBLEMA: uso de .Result dentro de método
+        // ⚠️ PROBLEMA: uso de .Result dentro de método
         ValidateCardPrivateResponse(customer, customerToken, cardsToken, baseUrl, headers, card);
     }
 }
 
 private void ValidateCardPrivateResponse(CustomerTokenResponse customer, string customerToken, ConcurrentBag<CardData> cardsToken, string baseUrl, Dictionary<string, string> headers, CardData card)
 {
-    // ❌ PROBLEMA: .Result bloquea el Thread
+    // ⚠️ PROBLEMA: .Result bloquea el Thread
     var resultado = PostCardTokenPrivate(card, customer, customerToken, baseUrl, headers).Result;
     if (resultado?.Data is not null)
     {
@@ -158,7 +158,7 @@ private void ValidateCardPrivateResponse(CustomerTokenResponse customer, string 
 
 private void ValidateCardFranchisResponse(CustomerTokenResponse customer, string customerToken, ConcurrentBag<CardData> cardsToken, string baseUrl, Dictionary<string, string> headers, CardData card)
 {
-    // ❌ PROBLEMA: .Result bloquea el Thread
+    // ⚠️ PROBLEMA: .Result bloquea el Thread
     var resultado = PostCardTokenFranchis(card, customer, customerToken, baseUrl, headers).Result;
     if (resultado?.Data is not null)
     {
@@ -227,7 +227,7 @@ private async Task ValidateCardPrivateResponseAsync(CustomerTokenResponse custom
 ---
 
 ### **Problema 1.5: ErrorHandlerMiddleware.cs - Línea 73**
-#### Código Actual ❌:
+#### Código Actual ⚠️:
 
 ```csharp
 // ErrorHandlerMiddleware.cs
@@ -235,12 +235,12 @@ public async Task InvokeAsync(HttpContext context, TraceIdentifier? traceIdentif
 {
     try
     {
-        // ❌ PROBLEMA: .ConfigureAwait innecesario
+        // ⚠️ PROBLEMA: .ConfigureAwait innecesario
         await _next(context).ConfigureAwait(false);
     }
     catch (Exception error)
     {
-         // ❌ PROBLEMA: uso interno de .Wait() bloquea el thread
+         // ⚠️ PROBLEMA: uso interno de .Wait() bloquea el thread
          SetStatusCodeResponse(context, logger, traceIdentifier, persisteLog, error, responseModel);
     }
 }
@@ -249,7 +249,7 @@ private static void SetStatusCodeResponse(HttpContext context, ILogger<ErrorHand
 {
     ...
 
-    // ❌ PROBLEMA: .Wait() bloquea el thread
+    // ⚠️ PROBLEMA: .Wait() bloquea el thread
     if (context.Response.StatusCode != StatusCodes.Status400BadRequest)
         Task.Run(() => persisteLog.AddLog(traceIdentifier!.GUID, error, error.Message)).Wait(); 
 
@@ -290,13 +290,13 @@ private static void SetStatusCodeResponse(HttpContext context, ILogger<ErrorHand
 
 ---
 
-## Hallazgo 2: Paralelismo Bloqueante por Asincronía Incompleta
+## Hallazgo 2 - Paralelismo bloqueante por asincronía incompleta
 ### **Severidad:** 🔴 CRÍTICA
 ### **Ubicación:** `ValidateTokenService.cs` - Método `ValidateCard`
 
 ---
 
-### **Código Actual ❌:**
+### **Código Actual ⚠️:**
 
 ```csharp
 // ValidateTokenService.cs - Líneas 85-120
@@ -305,13 +305,13 @@ public async Task<List<CardData>> GetCardsToken(List<CardData> data,
 {
     ...
     
-    // ❌ PROBLEMA 1: Parallel.ForEachAsync con MaxDegreeOfParallelism arbitrario
+    // ⚠️ PROBLEMA 1: Parallel.ForEachAsync con MaxDegreeOfParallelism arbitrario
     var options = new ParallelOptions { MaxDegreeOfParallelism = 5 };
     
-    // ❌ PROBLEMA 2: Task.Run innecesario dentro de async
+    // ⚠️ PROBLEMA 2: Task.Run innecesario dentro de async
     await Parallel.ForEachAsync(data, options, async (card, token) =>
     {
-        // ❌ PROBLEMA 3: Método síncrono que bloquea con .Result
+        // ⚠️ PROBLEMA 3: Método síncrono que bloquea con .Result
         await Task.Run(() => {
             ProccessCardToken(customer, customerToken, cardsToken, baseUrl, headers, card);
         }, CancellationToken.None);
@@ -351,13 +351,13 @@ public async Task<List<CardData>> GetCardsToken(List<CardData> data,
 
 ---
 
-### **Código Actual ❌:**
+### **Código Actual ⚠️:**
 
 ```csharp
 // DependencyInjectionHandler.cs
 public static IServiceCollection DependencyInjectionConfig(this IServiceCollection services)
 {
-    // ❌ PROBLEMA: Sin timeout explícito, sin límite de conexiones
+    // ⚠️ PROBLEMA: Sin timeout explícito, sin límite de conexiones
     services.AddHttpClient<IRestService, RestService>()
         .AddTransientHttpErrorPolicy(policyBuilder => 
             policyBuilder.WaitAndRetryAsync(
@@ -416,7 +416,7 @@ public static IServiceCollection DependencyInjectionConfig(
 
 ---
 
-## Hallazgo 4: Persistencia Innecesaria en Camino Crítico
+## Hallazgo 4 - Persistencia innecesaria
 
 ### **Severidad:** 🟡 ALTA
 
@@ -424,7 +424,7 @@ public static IServiceCollection DependencyInjectionConfig(
 
 ---
 
-### Código Actual ❌:
+### Código Actual ⚠️:
 
 ```csharp
 // CardService.cs - GetCards
@@ -432,7 +432,7 @@ public async Task<Response<GetCardsResponse>> GetCards(...)
 {
     ...
     
-    // ❌ PROBLEMA: Escritura MongoDB BLOQUEA el response
+    // ⚠️ PROBLEMA: Escritura MongoDB BLOQUEA el response
     await _crudService.AddOrUpdate(_cardsEntity);
     
     return response;
@@ -449,7 +449,7 @@ public async Task AddOrUpdate<TEntity>(TEntity data) where TEntity : CommonEntit
 {
     var collection = _database.GetCollection<TEntity>(typeof(TEntity).Name);
     
-    // ❌ PROBLEMA 1: UpdateOne con múltiples operaciones costosas
+    // ⚠️ PROBLEMA 1: UpdateOne con múltiples operaciones costosas
     var result = await collection.UpdateOneAsync(
         Builders<TEntity>.Filter.Eq(i => i.Id, data.Id),
         Builders<TEntity>.Update
@@ -464,8 +464,8 @@ public async Task AddOrUpdate<TEntity>(TEntity data) where TEntity : CommonEntit
         new UpdateOptions { IsUpsert = true }
     );
     
-    // ❌ PROBLEMA 2: Sin índices → Scan completo de colección
-    // ❌ PROBLEMA 3: Arrays crecen indefinidamente (CardsNumber con 1000+ elementos)
+    // ⚠️ PROBLEMA 2: Sin índices → Scan completo de colección
+    // ⚠️ PROBLEMA 3: Arrays crecen indefinidamente (CardsNumber con 1000+ elementos)
 }
 ```
 
@@ -598,7 +598,7 @@ db.CardAccessEvents.createIndex(
 
 ---
 
-## Hallazgo 5: Doble Capa de Cache con Serialización Innecesaria
+## Hallazgo 5 - Doble capa de cache con serialización innecesaria
 
 ### **Severidad:** 🟡 ALTA
 
@@ -606,7 +606,7 @@ db.CardAccessEvents.createIndex(
 
 ---
 
-### Código Actual ❌:
+### Código Actual ⚠️:
 
 ```csharp
 // CacheManager.cs - Serialización JSON innecesaria
@@ -619,7 +619,7 @@ public class CacheManager : ICacheManager
         _memoryCache = memoryCache;
     }
     
-    // ❌ PROBLEMA: Serializa a JSON antes de guardar en memoria
+    // ⚠️ PROBLEMA: Serializa a JSON antes de guardar en memoria
     public Task<bool> Save(string key, object valor, int segundos)
     {
         // ⚠️ JsonConvert.SerializeObject es COSTOSO e INNECESARIO
@@ -631,7 +631,7 @@ public class CacheManager : ICacheManager
         return Task.FromResult(true);
     }
     
-    // ❌ PROBLEMA: Deserializa desde JSON en cada lectura
+    // ⚠️ PROBLEMA: Deserializa desde JSON en cada lectura
     public Task<T> Get<T>(string key)
     {
         if (_memoryCache.TryGetValue(key, out string? valor))
@@ -714,14 +714,14 @@ public interface ICacheManager
 
 ---
 
-### **Código Actual ❌:**
+### **Código Actual ⚠️:**
 
 ```csharp
 // DependencyInjectionHandler.cs
 
 public static IServiceCollection DependencyInjectionConfig(this IServiceCollection services)
 {
-    // ❌ PROBLEMA CRÍTICO: Cache como Scoped = Cache no funcional, ya que se limpia en cada peticion
+    // ⚠️ PROBLEMA CRÍTICO: Cache como Scoped = Cache no funcional, ya que se limpia en cada peticion
     services.AddScoped<ICacheManager, CacheManager>();
     services.AddScoped<ICacheService, CacheService>();
     
