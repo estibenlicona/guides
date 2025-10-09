@@ -1,6 +1,6 @@
-# Informe Técnico - Análisis de Performance API Cards
+### Informe Técnico - Análisis de Performance API Cards
 
-## Hallazgo 1 - Ruptura de asincronía end-to-end
+### Hallazgo 1 - Ruptura de asincronía end-to-end
 ### **Severidad:** 🔴 CRÍTICA
 ### **Descripción Técnica:**
 
@@ -9,7 +9,7 @@ El código utiliza patrones bloqueantes (`.Result`, `.GetAwaiter().GetResult()`,
 ---
 
 ### **Problema 1.1: CardService.cs - Línea 68**
-#### Código Actual ⚠️:
+### Código Actual ⚠️:
 
 ```csharp
 // CardService.cs
@@ -26,7 +26,7 @@ public async Task<Response<GetCardsResponse>> GetCards(string tppId, Query query
         .GetResult();
 }
 ```
-#### Solución Propuesta✅:
+### Solución Propuesta✅:
 
 ```csharp
 // CardService.cs
@@ -45,7 +45,7 @@ public async Task<Response<GetCardsResponse>> GetCards(string tppId, Query query
 ---
 
 ### **Problema 1.2: CardDetailService.cs - Líneas 255 y 326**
-#### Código Actual ⚠️:
+### Código Actual ⚠️:
 
 ```csharp
 // CardDetailService.cs - Método GetCardDetailFranchised
@@ -67,7 +67,7 @@ private async Task<CardDetailResponseDto> GetCardDetailFranchised(
 }
 ```
 
-#### Solución Propuesta✅:
+### Solución Propuesta✅:
 
 ```csharp
 // CardDetailService.cs
@@ -89,7 +89,7 @@ private async Task<CardDetailResponseDto> GetCardDetailFranchised(
 ---
 
 ### **Problema 1.3: BinesProductInfoService.cs - Líneas 53-55**
-#### Código Actual ⚠️:
+### Código Actual ⚠️:
 
 ```csharp
 // BinesProductInfoService.cs - Método GetInfoCardBin
@@ -105,7 +105,7 @@ public async Task<BinesProductIdDto?> GetInfoCardBin()
 }
 ```
 
-#### Solución Propuesta✅:
+### Solución Propuesta✅:
 
 ```csharp
 // BinesProductInfoService.cs
@@ -125,7 +125,7 @@ public async Task<BinesProductIdDto?> GetInfoCardBin()
 
 ### **Problema 1.4: ValidateTokenService.cs - Líneas 117 y 131**
 
-#### Código Actual ⚠️:
+### Código Actual ⚠️:
 
 ```csharp
 // ValidateTokenService.cs
@@ -170,7 +170,7 @@ private void ValidateCardFranchisResponse(CustomerTokenResponse customer, string
 }
 ```
 
-#### Solución Propuesta✅:
+### Solución Propuesta✅:
 
 ```csharp
 // ValidateTokenService.cs
@@ -227,7 +227,7 @@ private async Task ValidateCardPrivateResponseAsync(CustomerTokenResponse custom
 ---
 
 ### **Problema 1.5: ErrorHandlerMiddleware.cs - Línea 73**
-#### Código Actual ⚠️:
+### Código Actual ⚠️:
 
 ```csharp
 // ErrorHandlerMiddleware.cs
@@ -255,7 +255,7 @@ private static void SetStatusCodeResponse(HttpContext context, ILogger<ErrorHand
 
 }
 ```
-#### Solución Propuesta✅:
+### Solución Propuesta✅:
 
 ```csharp
 // ErrorHandlerMiddleware.cs
@@ -290,7 +290,7 @@ private static void SetStatusCodeResponse(HttpContext context, ILogger<ErrorHand
 
 ---
 
-## Hallazgo 2 - Paralelismo bloqueante por asincronía incompleta
+### Hallazgo 2 - Paralelismo bloqueante por asincronía incompleta
 ### **Severidad:** 🔴 CRÍTICA
 ### **Ubicación:** `ValidateTokenService.cs` - Método `ValidateCard`
 
@@ -345,7 +345,7 @@ public async Task<List<CardData>> GetCardsToken(List<CardData> data,
 
 ```
 
-## Hallazgo 3: Configuración Deficiente de HttpClient
+### Hallazgo 3: Configuración Deficiente de HttpClient
 ### **Severidad:** 🔴 CRÍTICA
 ### **Ubicación:** `DependencyInjectionHandler.cs`
 
@@ -416,7 +416,7 @@ public static IServiceCollection DependencyInjectionConfig(
 
 ---
 
-## Hallazgo 4 - Persistencia innecesaria
+### Hallazgo 4 - Persistencia innecesaria
 
 ### **Severidad:** 🟡 ALTA
 
@@ -451,13 +451,13 @@ public async Task AddOrUpdate<TEntity>(TEntity data) where TEntity : CommonEntit
     
     // ⚠️ PROBLEMA 1: UpdateOne con múltiples operaciones costosas
     var result = await collection.UpdateOneAsync(
-        Builders<TEntity>.Filter.Eq(i => i.Id, data.Id),
+        Builders<TEntity>.Filter.Eq(i => i.Id, data.Id), // Validar que exista un indice para Id
         Builders<TEntity>.Update
             .SetOnInsert(s => s.Id, data.Id)
             .SetOnInsert(s => s.CreateDateTime, DateTime.Now)
             .Set(s => s.IdCard, data.IdCard)
-            .Set(s => s.CardsQuantity, data.CardsQuantity)  // ← Race condition
-            .Set(s => s.CardToken, data.CardToken)  // ← Sobrescribe
+            .Set(s => s.CardsQuantity, data.CardsQuantity)
+            .Set(s => s.CardToken, data.CardToken)
             .Set(s => s.SuccessfullResponse, data.SuccessfullResponse)
             .AddToSetEach(s => s.CardsNumber, data.CardsNumber)  // ← Costoso con arrays grandes
             .AddToSetEach(s => s.BrokerEndPoint, data.BrokerEndPoint),
@@ -465,7 +465,7 @@ public async Task AddOrUpdate<TEntity>(TEntity data) where TEntity : CommonEntit
     );
     
     // ⚠️ PROBLEMA 2: Sin índices → Scan completo de colección
-    // ⚠️ PROBLEMA 3: Arrays crecen indefinidamente (CardsNumber con 1000+ elementos)
+    // ⚠️ PROBLEMA 3: CardsNumber puede crecer indefinidamente aumentando el numero de comprobaciones
 }
 ```
 
@@ -488,73 +488,20 @@ public async Task<Response<GetCardsResponse>> GetCards(...)
 
 ---
 
-### **Solución OPCIÓN 3: Event Sourcing (cambio de arquitectura):**
+### **Solución OPCIÓN 3: cambio de arquitectura:**
 
-```csharp
-// CardAccessEvent.cs (nuevo modelo)
-public class CardAccessEvent
-{
-    public string Id { get; set; }  // Guid único
-    public string CustomerId { get; set; }
-    public string Endpoint { get; set; }  // "GetCards"
-    public List<string> CardsReturned { get; set; }
-    public int CardsCount { get; set; }
-    public DateTime Timestamp { get; set; }
-    public string TraceId { get; set; }
-}
+Implementar una cola de mensajes (puede ser en memoria o persistente, según la criticidad de la información) y un worker independiente encargado de procesar los mensajes y registrar la información en MongoDB.
 
-// EventStoreService.cs (nuevo servicio)
-public class EventStoreService : IEventStoreService
-{
-    private readonly IMongoDatabase _database;
-    private readonly ILogger<EventStoreService> _logger;
-    
-    public async Task RecordCardAccessEvent(CardAccessEvent evt)
-    {
-        var collection = _database.GetCollection<CardAccessEvent>("CardAccessEvents");
-        
-        // ✅ InsertOne es MÁS RÁPIDO que UpdateOne
-        await collection.InsertOneAsync(evt);
-    }
-}
+Con este enfoque:
 
-// CardService.cs - Usando event sourcing
-public async Task<Response<GetCardsResponse>> GetCards(...)
-{
-    // ... obtener tarjetas de APIs externas (500ms)
-    
-    // ✅ Registrar evento (fire-and-forget)
-    _ = Task.Run(async () =>
-    {
-        try
-        {
-            var evt = new CardAccessEvent
-            {
-                Id = Guid.NewGuid().ToString(),
-                CustomerId = query.customerId,
-                Endpoint = "GetCards",
-                CardsReturned = cardNumbers,
-                CardsCount = cardNumbers.Count,
-                Timestamp = DateTime.UtcNow,
-                TraceId = HttpContext.TraceIdentifier
-            };
-            
-            await _eventStoreService.RecordCardAccessEvent(evt);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error registrando evento de acceso");
-        }
-    });
-    
-    // ✅ Retornar response INMEDIATAMENTE
-    return response;
-}
-```
+- La API no escribe directamente en la base de datos, sino que delega la operación a la cola.
+- Se evita la presión directa sobre MongoDB en escenarios de alta concurrencia.
+- Se gana resiliencia, ya que la cola permite desacoplar la recepción de peticiones de su procesamiento.
+- La elección entre cola en memoria (rápida, pero volátil) o persistente (más lenta, pero segura) dependerá de la importancia y criticidad de la información a almacenar.
 
 ---
 
-## Hallazgo 5 - Doble capa de cache con serialización innecesaria
+### Hallazgo 5 - Doble capa de cache con serialización innecesaria
 
 ### **Severidad:** 🟡 ALTA
 
@@ -581,7 +528,7 @@ public class CacheManager : ICacheManager
         // ⚠️ JsonConvert.SerializeObject es COSTOSO e INNECESARIO
         _memoryCache.Set(
             key, 
-            JsonConvert.SerializeObject(valor),  // ← ~5ms + allocations
+            JsonConvert.SerializeObject(valor),
             new TimeSpan(0, 0, segundos)
         );
         return Task.FromResult(true);
@@ -594,7 +541,7 @@ public class CacheManager : ICacheManager
         {
             // ⚠️ JsonConvert.DeserializeObject es COSTOSO e INNECESARIO
             return Task.FromResult(
-                JsonConvert.DeserializeObject<T>(valor!)!  // ← ~5ms + allocations
+                JsonConvert.DeserializeObject<T>(valor!)!
             );
         }
         
@@ -660,7 +607,7 @@ public interface ICacheManager
 }
 ```
 
-## Hallazgo 6: Cache Registrado como Scoped (Cache Inútil)
+### Hallazgo 6: Cache Registrado como Scoped (Cache Inútil)
 
 ### **Severidad:** 🔴 CRÍTICA
 
